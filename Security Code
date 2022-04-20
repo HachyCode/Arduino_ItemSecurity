@@ -1,0 +1,496 @@
+//ITEM SECURITY CODE
+
+//Libray imports
+#include <IRremote.h>
+
+#include <Servo.h>
+
+#include <LiquidCrystal.h>
+
+#include <Adafruit_NeoPixel.h>
+#ifdef __AVR__
+ #include <avr/power.h> 
+#endif
+
+#include <DHT.h>
+#include <DHT_U.h>
+
+//Pins
+const int microLPin = 6;
+const int microRPin = 5;
+
+const int piezoPin = 3;
+const int buttonPin = 2;
+
+const int ultraDistanceEchoPin = 10;
+const int ultraDistanceTrigPin = A1;
+
+const int tiltPin = 11;
+const int humidityTempPin = A2;
+const int irSensorPin = A0;
+const int ledPin = A5;
+const int forcePin = A3;
+const int photoresitorPin = A4;
+
+const int lcdRS = 13;
+const int lcdEN = 12;
+const int lcdDB4 = 9;
+const int lcdDB5 = 8;
+const int lcdDB6 = 7;
+const int lcdDB7 = 4;
+
+//Properties
+int forceData = 0;
+int photoresitorData = 0;
+int buttonData = 0;
+int tiltData = 0;
+int ultraDistanceDataPulse = 0;
+int ultraDistanceDataDistance = 0;
+
+bool audioAlarm = false;
+bool silentAlarm = false;
+
+int recivedData = 000;
+int sendData = 0;
+
+const int tempNormalMin = 19;
+const int tempNormalMax = 23;
+const int humidityNormalMin = 40;
+const int humidityNormalMax = 70;
+const int forceNormalMin = 1;
+const int forceNormalMax = 25;
+const int photoresitorNormalMin = 2;
+const int photoresitorNormalMax = 50;
+const int DistanceMin = 5;
+const int TiltMin = 0;
+
+// Humidity Temperature setup proterties
+#define Type DHT11
+DHT HT(A2,Type);
+float humidity;
+float tempC;
+int Vo;
+float logR2, R2, T, Tc, Tf;
+float c1 = 1.009249522e-03, c2 = 2.378405444e-04, c3 = 2.019202697e-07;
+
+// Interupt setup proterties
+unsigned long buttonTime = 0;
+unsigned long lastButtonTime = 0;
+
+//LED setup proterties
+int pixelsAmount = 60;
+Adafruit_NeoPixel pixels(pixelsAmount, A5, NEO_GRB + NEO_KHZ800);
+
+//Motor setup proterties
+Servo microRData;   
+Servo microLData; 
+
+int microLAngle;
+int microRAngle;
+
+//IR sensor setup proterties
+IRrecv IR(A0);
+decode_results irCmd;
+String irCmdData;
+
+//Lcd setup proterties
+LiquidCrystal lcd(lcdRS, lcdEN, lcdDB4, lcdDB5, lcdDB6, lcdDB7);
+
+void setup() {
+  Serial.begin(9600);
+  Led(0);
+
+  //INPUTS
+  pinMode(tiltPin, INPUT);
+  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(forcePin, INPUT);
+  pinMode(humidityTempPin, INPUT);
+  pinMode(photoresitorPin, INPUT);
+  pinMode(irSensorPin, INPUT);
+  pinMode(ultraDistanceEchoPin, INPUT);
+
+  //OUTPUTS
+  pinMode(piezoPin, OUTPUT);
+  pinMode(ultraDistanceTrigPin, OUTPUT);
+
+  //Digital Write
+  digitalWrite(tiltPin,HIGH);
+
+  //Library Setups
+  HT.begin();
+
+  //Interup Setups
+  attachInterrupt(digitalPinToInterrupt(buttonPin), ButtonInterupt, CHANGE);
+
+  //LED Setups
+  #if defined(__AVR_ATtiny85__) && (F_CPU == 16000000)
+    clock_prescale_set(clock_div_1);
+  #endif
+  pixels.begin();
+
+  //Lcd Setups
+  lcd.begin(16, 2);
+  lcd.clear();
+
+  //IR Setups
+  IR.enableIRIn();
+}
+
+void loop() {
+  Update();
+  Display();
+  Led(0);
+  if((forceData < forceNormalMin)
+    ||(photoresitorData > photoresitorNormalMax || photoresitorData < photoresitorNormalMin)
+    ||(tempC > tempNormalMax +5|| tempC < tempNormalMin -5)
+    ||(humidity > humidityNormalMax || humidity < humidityNormalMin)){
+
+    DataTest();
+      
+    Serial.println("audio alarm");
+
+    audioAlarm = true;
+    AudibleAlarm();
+  }
+
+  if((forceData > forceNormalMax)
+    ||(tiltData == TiltMin) 
+    ||(ultraDistanceDataDistance <= DistanceMin)
+    ||(tempC > tempNormalMax +2|| tempC < tempNormalMin -2)
+    ||(humidity > humidityNormalMax || humidity < humidityNormalMin)){
+
+    DataTest();
+
+    Serial.println("silent alarm");
+
+    silentAlarm = true;
+    SilentAlarm();
+  }
+}
+
+void AudibleAlarm(){
+  Lcd();
+  Piezo(true);
+  Led(2);
+  Micro();
+  do 
+  {
+    ReciveData();
+  } while (audioAlarm);
+  Piezo(false);
+}
+
+void SilentAlarm(){
+  do
+  {
+    Lcd();
+    Led(1);
+    ReciveData();
+  } while (silentAlarm);
+}
+
+void ButtonInterupt(){
+  
+  buttonTime = millis();
+  LedFlash();
+
+  while (buttonTime < 20000)
+  {
+    buttonTime = millis();
+    Serial.print("Interupt: ");
+    Serial.print(buttonTime);
+  }
+}
+
+void Display(){
+  Serial.print("Tilt: ");
+  Serial.println(tiltData);
+  
+  Serial.print("Button: ");
+  Serial.println(buttonData);
+  
+  Serial.print("Force: ");
+  Serial.println(forceData);
+  
+  Serial.print("Photoresitor: ");
+  Serial.println(photoresitorData);
+
+  Serial.print("Humidity: ");
+  Serial.print(humidity);
+  Serial.print("% Temperature ");
+  Serial.print(tempC);
+  Serial.print(" C ");
+
+  Serial.print("Distance: ");
+  Serial.print(ultraDistanceDataDistance);
+  Serial.println("cm");
+  
+  delay(300);
+}
+
+void Update(){
+  sendData = 0;
+  Lcd();
+  Tilt();
+  Button();
+  Force();
+  HumidityTemp();
+  Photoresitor();
+  UltraDistance();
+}
+
+void Lcd()
+{
+  lcd.clear();
+  
+  lcd.setCursor(0, 1);
+  lcd.print("By : ");
+  
+  if (sendData == 1) //force
+  {
+    lcd.print("force");
+  }
+  else if (sendData == 2) //photoresitor
+  {
+    lcd.print("photoresitor");
+  }
+  else  if (sendData == 3) //temperature
+  {
+    lcd.print("temperature");
+  }
+  else if (sendData == 4) //humidity
+  {
+    lcd.print("humidity");
+  }
+  else if (sendData == 5) //tilt
+  {
+    lcd.print("tilt");
+  }
+  else if (sendData == 6) //ultraDistance
+  {
+    lcd.print("ultraDistance");
+  } 
+  else //error
+  {
+    lcd.print(":D");
+  } 
+
+  lcd.setCursor(0, 0);
+  
+  if (audioAlarm) //audioAlarm
+  {
+    lcd.print("Audible Alarm");
+  }
+  else if (silentAlarm) //silentAlarm
+  {
+    lcd.print("Silent Alarm");
+  }
+  else //error
+  {
+    lcd.print("No Alert");
+  } 
+}
+
+void Led(int type){
+  
+  if (type == 0){
+    pixels.clear();
+    for(int i=0; i<pixelsAmount; i++) { 
+      pixels.setPixelColor(i, pixels.Color(0, 50, 0));
+    }
+    pixels.show();
+  }
+
+  if (type == 1){ //Silent Alarm
+    pixels.clear();
+    for(int i=0; i<pixelsAmount; i++) { 
+      pixels.setPixelColor(i, pixels.Color(0, 50, 20));
+    }
+    pixels.show();
+  }
+
+  if (type == 2){ //Audio Alarm
+    pixels.clear();
+    for(int i=0; i<pixelsAmount; i++) { 
+      pixels.setPixelColor(i, pixels.Color(50, 0, 0));
+    }
+    pixels.show();
+  }
+}
+void LedFlash(){ //Button Interupt
+  pixels.clear();
+    for(int i=0; i<pixelsAmount; i = i+2) { 
+      pixels.setPixelColor(i, pixels.Color(0, 0, 50));
+      pixels.setPixelColor(i+1, pixels.Color(0, 50, 0));
+    }
+  pixels.show();
+}
+
+void Tilt(){
+  tiltData = digitalRead(tiltPin);
+}
+
+void Button(){
+  buttonData = digitalRead(buttonPin);
+}
+
+void Force(){
+  forceData = analogRead(forcePin);
+}
+
+void HumidityTemp(){
+  humidity=HT.readHumidity();
+  tempC=HT.readTemperature();
+}
+
+void Photoresitor(){
+  photoresitorData = analogRead(photoresitorPin);
+}
+
+void Piezo(bool type){
+
+  if(type)
+  {
+    tone(piezoPin, 1000);
+  }
+  else
+  {
+    noTone(piezoPin);
+  }
+}
+
+void UltraDistance(){
+  digitalWrite(ultraDistanceTrigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(ultraDistanceTrigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ultraDistanceTrigPin, LOW);
+
+  ultraDistanceDataPulse = pulseIn(ultraDistanceEchoPin, HIGH);
+  ultraDistanceDataDistance = ultraDistanceDataPulse * 0.034 / 2;
+}
+
+void Micro(){
+  microRData.attach(microRPin);
+  microLData.attach(microLPin);
+    
+  microLAngle = 0;
+  microRAngle = 180;
+    
+  for (microLAngle = 0; microLAngle <= 180; microLAngle++)
+  {
+    microLData.write(microLAngle);
+    microRData.write(microRAngle);
+    delay(100);
+    microRAngle--;
+  };
+  
+  microRAngle = 0;
+  microLAngle = 180;
+  microRData.write(microRAngle);
+  microLData.write(microLAngle);
+  microRData.detach();
+  microLData.detach();
+}
+
+void IRsensor()
+{
+  while (IR.decode(&irCmd)==0){}
+  Serial.println(irCmd.value,HEX);
+  delay(1500);
+  IR.resume();
+  
+  if (irCmd.value==0xFF6897){
+    recivedData = 111;
+    Serial.println("zero"); 
+  }
+  else if (irCmd.value==0xFF38C7){
+      Serial.print("5");
+
+      while (IR.decode(&irCmd)==0){}
+      delay(1500);
+      IR.resume();
+      
+      if (irCmd.value==0xFF5AA5){
+        Serial.print("6");
+
+        while (IR.decode(&irCmd)==0){}
+        delay(1500);
+        IR.resume();
+
+        if (irCmd.value==0xFF4AB5){
+          Serial.print("7");
+
+          while (IR.decode(&irCmd)==0){}
+          delay(1500);
+          IR.resume();
+
+          if (irCmd.value==0xFF52AD){
+            Serial.println("8");
+
+            audioAlarm = false;
+          }
+        }
+      }
+  }
+
+  else
+  {
+    recivedData == 000;
+  }
+  
+}
+
+void ReciveData(){
+
+  if(recivedData == 111)
+  {
+    silentAlarm = false;
+    recivedData = 000;
+  }
+  else if(recivedData == 222)
+  {
+    audioAlarm = false;
+    recivedData = 000;
+  }
+  else 
+  {
+    IRsensor();
+  }
+}
+void DataTest(){
+  sendData = 0;
+  
+  if (forceData > forceNormalMax || forceData < forceNormalMin)
+  {
+    sendData = 1;
+    Serial.println("1");
+  }
+  else if (photoresitorData > photoresitorNormalMax || photoresitorData < photoresitorNormalMin)
+  {
+    sendData = 2;
+    Serial.println("2");
+  }
+  else if (tempC > tempNormalMax +2|| tempC < tempNormalMin -2)
+  {
+    sendData = 3;
+    Serial.println("3");
+  }
+  else if (humidity < humidityNormalMin || humidity > humidityNormalMax)
+  {
+    Serial.println("Humidity : ");
+    Serial.println(humidity < humidityNormalMin || humidity > humidityNormalMax);
+    sendData = 4;
+    Serial.println("4");
+  }
+  else if (tiltData == 0)
+  {
+    sendData = 5;
+    Serial.println("5");
+  }
+  else if (ultraDistanceDataDistance <= DistanceMin)
+  {
+    sendData = 6;
+    Serial.println("6");
+  }
+}
